@@ -1,0 +1,11 @@
+{
+    "scripts": {
+        "build": "tsc",
+        "dev": "yarn build && node scripts/dev-copy.js && node server"
+    },
+    "dependencies": {},
+    "devDependencies": {
+        "koa": "^2.15.0",
+        "koa-static-server": "^1.5.2"
+    }
+}

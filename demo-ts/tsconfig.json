@@ -1,0 +1,18 @@
+{
+    "version": "1.8.0",
+    "compilerOptions": {
+        "outDir": "dist",
+        "lib": ["DOM", "es6" ],
+        "target": "es2017",
+        "moduleResolution": "node",
+        "module": "AMD",
+        "emitDecoratorMetadata": true,
+        "experimentalDecorators": true,
+        "sourceMap": false,
+        "noImplicitAny": false,
+        "declaration": true
+    },
+    "include": [
+        "src/**/*",
+    ]
+}
