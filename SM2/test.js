@@ -38,7 +38,6 @@ function doDecrypt(encryptData, privateKey, cipherMode = 1) {
     const c1X = encryptData.substr(0, 64)
     const c1Y = encryptData.substr(0 + c1X.length, 64)
     const c1Length = c1X.length + c1Y.length
-    console.log("c1Length", c1Length);
     let c2 = encryptData.substr(c1Length + 64)
     if (cipherMode === C1C2C3) {
         c2 = encryptData.substr(c1Length, encryptData.length - c1Length - 64)
@@ -56,10 +55,9 @@ function doDecrypt(encryptData, privateKey, cipherMode = 1) {
 
 
 var pubkeyHex = "a3034a408cf3308861cb75edf6a6f00fccecde5db35e1506af0a18253badc4e878776ecbd553a179bd5d3e478007de97ae531ba15f5cff2ef253ddb712739073"
-
-var encryptData = doEncrypt("94934842434235465891973692438378", pubkeyHex, 0).toUpperCase();
-console.log("encryptData:", encryptData);
+var encryptData = doEncrypt("0123456789ABCDEF", pubkeyHex, 0).toUpperCase();
+console.log("encryptData:=============", encryptData);
 
 var privateKey = "03389b6cc5de98c33ee7b082cc6c8617fcc47163c51888ca08eee82776a4c4e8"
 var decryptData = doDecrypt(encryptData, privateKey, 0).toUpperCase();
-console.log("decryptData:", decryptData);
+console.log("decryptData:=============", decryptData);
