@@ -1,0 +1,37 @@
+Arguments: 
+  C:\Program Files\nodejs\node.exe C:\Users\auus\AppData\Roaming\npm\node_modules\yarn\bin\yarn.js add sharp
+
+PATH: 
+  C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\;C:\Windows\System32\OpenSSH\;;C:\Program Files\nodejs;C:\Program Files\Git\cmd;C:\Program Files\dotnet\;C:\Program Files\TortoiseGit\bin;C:\Program Files (x86)\Tencent\微信web开发者工具\dll;C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit\;;C:\Program Files\nodejs;C:\Program Files (x86)\depot_tools;C:\Program Files\TortoiseSVN\bin;C:\Users\auus\AppData\Local\Programs\Python\Python313;C:\Users\auus\AppData\Roaming\npm;E:\AAAAA\depot_tools;C:\Users\auus\AppData\Local\Programs\Python\Python313\Scripts\;C:\Users\auus\AppData\Local\Programs\Python\Python313\;C:\Users\auus\AppData\Local\Microsoft\WindowsApps;C:\Users\auus\AppData\Roaming\nvm;C:\Program Files\nodejs;C:\Users\auus\.dotnet\tools;node_modules;C:\Users\auus\AppData\Roaming\npm;C:\Users\auus\AppData\Local\Programs\Microsoft VS Code\bin;D:\安装包\Handle;C:\Program Files (x86)\depot_tools;
+
+Yarn version: 
+  1.22.11
+
+Node version: 
+  14.16.0
+
+Platform: 
+  win32 x64
+
+Trace: 
+  Error: getaddrinfo ENOTFOUND registry.npmmirror.com
+      at GetAddrInfoReqWrap.onlookup [as oncomplete] (dns.js:67:26)
+
+npm manifest: 
+  {
+    "name": "@aep/aep-update-framework",
+    "version": "5.3.24",
+    "main": "lib/index.js",
+    "license": "",
+    "scripts": {
+      "build": "tsc"
+    },
+    "dependencies": {
+    }
+  }
+
+yarn manifest: 
+  No manifest
+
+Lockfile: 
+  No lockfile

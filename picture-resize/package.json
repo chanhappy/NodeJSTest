@@ -1,0 +1,12 @@
+{
+  "name": "@aep/aep-update-framework",
+  "version": "5.3.24",
+  "main": "lib/index.js",
+  "license": "",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "sharp": "^0.34.5"
+  }
+}
