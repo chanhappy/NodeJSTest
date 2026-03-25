@@ -1,0 +1,12 @@
+{
+  "name": "aa",
+  "version": "5.3.24",
+  "main": "lib/index.js",
+  "license": "",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "images": "^3.2.4"
+  }
+}
