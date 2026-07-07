@@ -2,12 +2,12 @@
 """
 可转债分时差值计算（动态时间段）
 规则: 每天 time_end价格 - time_start价格，输出所有差值的总和
-数据: stock_zh_a_hist_min_em (东方财富5分钟K线)
+数据: stock_zh_a_minute (新浪5分钟K线，一次调用获取全量数据，避免东方财富限流)
   time_start ≈ 对应5分钟K线的开盘价
   time_end   ≈ 对应5分钟K线的收盘价
 用法:
-  python cb_ten_min_sum.py --code 127080 --from 20260701 --to 20260703 --time-start 09:30 --time-end 09:40
-  python cb_ten_min_sum.py --code 127080 --from 20260701 --to 20260703 --time-start 10:30 --time-end 13:10
+  python cb_minutes-diff-sum.py --code 127080 --from 20260701 --to 20260703 --time-start 09:30 --time-end 09:40
+  python cb_minutes-diff-sum.py --code 127080 --from 20260701 --to 20260703 --time-start 10:30 --time-end 13:10
 """
 import sys
 import json
@@ -48,7 +48,7 @@ def get_time_diff(code, from_date, to_date, time_start="09:30", time_end="09:40"
         f" | bar: {bar_start_time}(开) -> {bar_end_time}(收)\n"
     )
 
-    # 先获取日线确定交易日
+    # 1. 获取日线确定交易日
     df_daily = ak.bond_zh_hs_cov_daily(symbol=symbol_full)
     if df_daily.empty:
         sys.stderr.write("日线数据为空\n")
@@ -62,66 +62,110 @@ def get_time_diff(code, from_date, to_date, time_start="09:30", time_end="09:40"
 
     sys.stderr.write(f"区间交易日: {len(trading_days)} 天\n")
 
-    # API查询范围：覆盖 bar_start_time 到 bar_end_time + 5分钟缓冲
-    query_end_time = add_minutes(bar_end_time, 5)
+    # 2. 一次性获取所有可用的5分钟K线数据（新浪接口，无频率限制）
+    sys.stderr.write("获取5分钟K线数据（新浪）...\n")
+    try:
+        df_min = ak.stock_zh_a_minute(symbol=symbol_full, period="5")
+    except Exception as e:
+        sys.stderr.write(f"分钟数据获取失败: {e}\n")
+        return None
 
+    if df_min.empty:
+        sys.stderr.write("分钟数据为空\n")
+        return None
+
+    # 新浪的 day 字段是 datetime，格式如 "2026-05-07 09:35:00"
+    # 提取日期和时间部分
+    df_min["day"] = pd.to_datetime(df_min["day"])
+    df_min["date_str"] = df_min["day"].dt.strftime("%Y%m%d")
+    df_min["time_str"] = df_min["day"].dt.strftime("%H:%M")
+
+    data_start = df_min["date_str"].min()
+    data_end = df_min["date_str"].max()
+    sys.stderr.write(f"分钟数据范围: {data_start} ~ {data_end} ({len(df_min)} 条)\n")
+
+    # 筛选目标交易日
+    target_days_set = set(trading_days)
+    df_min_range = df_min[df_min["date_str"].isin(target_days_set)].copy()
+
+    sys.stderr.write(f"区间内匹配的分钟数据: {len(df_min_range)} 条\n")
+
+    if df_min_range.empty:
+        sys.stderr.write("区间内无分钟数据（可能日期超出新浪覆盖范围）\n")
+        return None
+
+    # 3. 构建日线数据映射（用于获取每日开盘价）
+    daily_open_map = {}
+    for _, row in df_daily.iterrows():
+        d_key = row["date"].strftime("%Y%m%d")
+        daily_open_map[d_key] = float(row["open"])
+
+    # 4. 按日期分组，找到每天的 bar_start_time 和 bar_end_time
     total = 0.0
+    pct_total = 0.0
     details = []
-    empty_days = 0
-    no_bar_days = 0
+    no_bar_days = set()
+    empty_days = set()
 
-    for idx, day in enumerate(trading_days):
-        if idx % 30 == 0:
-            sys.stderr.write(f"  进度: {idx}/{len(trading_days)}...\n")
-
-        try:
-            df_min = ak.stock_zh_a_hist_min_em(
-                symbol=code, period="5",
-                start_date=f"{day} {time_start}:00",
-                end_date=f"{day} {query_end_time}:00",
-                adjust=""
-            )
-        except Exception as e:
-            sys.stderr.write(f"  {day}: 接口异常 {str(e)[:60]}\n")
+    for day in trading_days:
+        day_data = df_min_range[df_min_range["date_str"] == day]
+        if day_data.empty:
+            empty_days.add(day)
             continue
 
-        if df_min.empty:
-            empty_days += 1
-            continue
-
-        # bar_start_time bar的开盘价 = time_start时刻的近似价格
-        # bar_end_time   bar的收盘价 = time_end时刻的近似价格
-        bar_start = df_min[df_min["时间"].astype(str).str.contains(bar_start_time)]
-        bar_end = df_min[df_min["时间"].astype(str).str.contains(bar_end_time)]
+        bar_start = day_data[day_data["time_str"] == bar_start_time]
+        bar_end = day_data[day_data["time_str"] == bar_end_time]
 
         if bar_start.empty or bar_end.empty:
-            no_bar_days += 1
+            no_bar_days.add(day)
             continue
 
-        price_start = float(bar_start.iloc[0]["开盘"])
-        price_end = float(bar_end.iloc[0]["收盘"])
+        price_start = float(bar_start.iloc[0]["open"])
+        price_end = float(bar_end.iloc[0]["close"])
         diff = round(price_end - price_start, 3)
         total += diff
+
+        # 百分比差值（基于当日开盘价）
+        day_open = daily_open_map.get(day)
+        if day_open and day_open > 0:
+            pct_start = round((price_start - day_open) / day_open * 100, 3)
+            pct_end = round((price_end - day_open) / day_open * 100, 3)
+            pct_diff = round(pct_end - pct_start, 3)
+        else:
+            pct_start = 0.0
+            pct_end = 0.0
+            pct_diff = 0.0
+
+        pct_total += pct_diff
 
         details.append({
             "date": day,
             "price_start": price_start,
             "price_end": price_end,
             "diff": diff,
+            "pct_diff": pct_diff,
         })
 
     sys.stderr.write(
-        f"  有效: {len(details)} 天, 无分钟数据: {empty_days} 天, "
-        f"缺少目标bar: {no_bar_days} 天\n"
+        f"  有效: {len(details)} 天, 无分钟数据: {len(empty_days)} 天, "
+        f"缺少目标bar: {len(no_bar_days)} 天\n"
     )
+    if empty_days:
+        out_of_range = [d for d in sorted(empty_days) if d < data_start or d > data_end]
+        if out_of_range:
+            sys.stderr.write(f"  超出新浪覆盖范围的日期: {out_of_range[0]} ~ {out_of_range[-1]} ({len(out_of_range)}天)\n")
 
     if len(details) == 0:
         return None
 
     max_pos = max(details, key=lambda x: x["diff"])
     max_neg = min(details, key=lambda x: x["diff"])
+    max_pct_pos = max(details, key=lambda x: x["pct_diff"])
+    max_pct_neg = min(details, key=lambda x: x["pct_diff"])
     pos_count = sum(1 for d in details if d["diff"] > 0)
     neg_count = sum(1 for d in details if d["diff"] < 0)
+    pct_pos_count = sum(1 for d in details if d["pct_diff"] > 0)
+    pct_neg_count = sum(1 for d in details if d["pct_diff"] < 0)
 
     return {
         "code": code,
@@ -131,21 +175,28 @@ def get_time_diff(code, from_date, to_date, time_start="09:30", time_end="09:40"
         "to_date": to_date,
         "total_trading_days": len(trading_days),
         "valid_days": len(details),
-        "empty_days": empty_days,
-        "no_bar_days": no_bar_days,
+        "empty_days": len(empty_days),
+        "no_bar_days": len(no_bar_days),
         "total": round(total, 3),
+        "pct_total": round(pct_total, 3),
         "positive_count": pos_count,
         "negative_count": neg_count,
         "zero_count": len(details) - pos_count - neg_count,
+        "pct_positive_count": pct_pos_count,
+        "pct_negative_count": pct_neg_count,
+        "pct_zero_count": len(details) - pct_pos_count - pct_neg_count,
         "max_positive": {"date": max_pos["date"], "diff": max_pos["diff"]},
         "max_negative": {"date": max_neg["date"], "diff": max_neg["diff"]},
+        "max_pct_positive": {"date": max_pct_pos["date"], "pct_diff": max_pct_pos["pct_diff"]},
+        "max_pct_negative": {"date": max_pct_neg["date"], "pct_diff": max_pct_neg["pct_diff"]},
         "details": details,
     }
 
 
 def main():
     parser = argparse.ArgumentParser(description="可转债分时差值计算")
-    parser.add_argument("--code", type=str, required=True, help="可转债代码")
+    parser.add_argument("--code", type=str, default="", help="可转债代码（单个）")
+    parser.add_argument("--codes", type=str, default="", help="可转债代码（逗号分隔，多个）")
     parser.add_argument("--from", dest="from_date", type=str, required=True)
     parser.add_argument("--to", dest="to_date", type=str, required=True)
     parser.add_argument("--time-start", type=str, default="09:30",
@@ -154,16 +205,39 @@ def main():
                         help="结束时间 HH:MM (默认 09:40)")
     args = parser.parse_args()
 
-    result = get_time_diff(
-        args.code, args.from_date, args.to_date,
-        args.time_start, args.time_end
-    )
+    # 合并 --code 和 --codes
+    all_codes = []
+    if args.codes:
+        all_codes.extend([c.strip() for c in args.codes.split(",") if c.strip()])
+    if args.code:
+        all_codes.append(args.code.strip())
 
-    if result is None:
-        print(json.dumps({"error": "无有效数据"}, ensure_ascii=False))
+    if not all_codes:
+        print(json.dumps({"error": "请指定 --code 或 --codes"}, ensure_ascii=False))
         sys.exit(1)
 
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    # 去重保持顺序
+    seen = set()
+    codes = []
+    for c in all_codes:
+        if c not in seen:
+            seen.add(c)
+            codes.append(c)
+
+    results = []
+    for i, code in enumerate(codes):
+        if len(codes) > 1:
+            sys.stderr.write(f"\n[{i+1}/{len(codes)}] ")
+        result = get_time_diff(
+            code, args.from_date, args.to_date,
+            args.time_start, args.time_end
+        )
+        if result is None:
+            results.append({"code": code, "error": "无有效数据"})
+        else:
+            results.append(result)
+
+    print(json.dumps(results, ensure_ascii=False))
 
 
 if __name__ == "__main__":

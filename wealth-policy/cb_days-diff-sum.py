@@ -81,9 +81,12 @@ def calc_diff_sum(name_or_code, from_date, to_date):
 
     # 计算差值
     total = 0.0
+    pct_total = 0.0
     details = []
     pos_count = 0
     neg_count = 0
+    pct_pos_count = 0
+    pct_neg_count = 0
 
     for i in range(len(df_range) - 1):
         open_next = float(df_range.iloc[i + 1]["open"])
@@ -96,22 +99,40 @@ def calc_diff_sum(name_or_code, from_date, to_date):
         elif diff < 0:
             neg_count += 1
 
+        # 百分比差值 = (次日开盘 - 当日收盘) / 当日收盘 * 100
+        if close_curr > 0:
+            pct_diff = round(diff / close_curr * 100, 3)
+        else:
+            pct_diff = 0.0
+        pct_total += pct_diff
+
+        if pct_diff > 0:
+            pct_pos_count += 1
+        elif pct_diff < 0:
+            pct_neg_count += 1
+
         details.append({
             "date": df_range.iloc[i]["date"].strftime("%Y-%m-%d"),
             "next_date": df_range.iloc[i + 1]["date"].strftime("%Y-%m-%d"),
             "close": close_curr,
             "next_open": open_next,
             "diff": diff,
+            "pct_diff": pct_diff,
         })
 
     # 找最大正差和最大负差
     max_pos = max(details, key=lambda x: x["diff"])
     max_neg = min(details, key=lambda x: x["diff"])
+    max_pct_pos = max(details, key=lambda x: x["pct_diff"])
+    max_pct_neg = min(details, key=lambda x: x["pct_diff"])
 
     # 数据范围内的首尾价格
     first_close = float(df_range.iloc[0]["close"])
     last_close = float(df_range.iloc[-1]["close"])
     price_change = round(last_close - first_close, 3)
+
+    zero_count = len(details) - pos_count - neg_count
+    pct_zero_count = len(details) - pct_pos_count - pct_neg_count
 
     return {
         "code": code,
@@ -121,34 +142,67 @@ def calc_diff_sum(name_or_code, from_date, to_date):
         "trading_days": len(df_range),
         "pairs": len(details),
         "total": round(total, 3),
+        "pct_total": round(pct_total, 3),
         "first_close": first_close,
         "last_close": last_close,
         "price_change": price_change,
         "max_positive": {"date": max_pos["date"], "next_date": max_pos["next_date"], "diff": max_pos["diff"]},
         "max_negative": {"date": max_neg["date"], "next_date": max_neg["next_date"], "diff": max_neg["diff"]},
+        "max_pct_positive": {"date": max_pct_pos["date"], "pct_diff": max_pct_pos["pct_diff"]},
+        "max_pct_negative": {"date": max_pct_neg["date"], "pct_diff": max_pct_neg["pct_diff"]},
         "positive_count": pos_count,
         "negative_count": neg_count,
+        "zero_count": zero_count,
+        "pct_positive_count": pct_pos_count,
+        "pct_negative_count": pct_neg_count,
+        "pct_zero_count": pct_zero_count,
         "details": details,
     }
 
 
 def main():
     parser = argparse.ArgumentParser(description="可转债隔夜跳空差值计算")
-    parser.add_argument("--name", type=str, required=True, help="可转债名称或代码")
+    parser.add_argument("--name", type=str, default="", help="可转债名称或代码（单个）")
+    parser.add_argument("--names", type=str, default="", help="可转债名称或代码（逗号分隔，多个）")
     parser.add_argument("--from", dest="from_date", type=str, required=True, help="起始日期 YYYYMMDD")
     parser.add_argument("--to", dest="to_date", type=str, required=True, help="结束日期 YYYYMMDD")
     args = parser.parse_args()
 
-    result = calc_diff_sum(args.name, args.from_date, args.to_date)
+    # 合并 --name 和 --names
+    all_inputs = []
+    if args.names:
+        all_inputs.extend([c.strip() for c in args.names.split(",") if c.strip()])
+    if args.name:
+        all_inputs.append(args.name.strip())
 
-    if result is None:
-        print(json.dumps({"error": "计算失败"}, ensure_ascii=False))
+    if not all_inputs:
+        print(json.dumps({"error": "请指定 --name 或 --names"}, ensure_ascii=False))
         sys.exit(1)
 
-    # 输出 JSON（details 太大，单独控制是否输出）
-    output = {k: v for k, v in result.items() if k != "details"}
-    output["details"] = result["details"]
-    print(json.dumps(output, ensure_ascii=False, indent=2))
+    # 去重保持顺序
+    seen = set()
+    inputs = []
+    for x in all_inputs:
+        if x not in seen:
+            seen.add(x)
+            inputs.append(x)
+
+    results = []
+    for i, inp in enumerate(inputs):
+        if len(inputs) > 1:
+            sys.stderr.write(f"\n[{i+1}/{len(inputs)}] ")
+        result = calc_diff_sum(inp, args.from_date, args.to_date)
+        if result is None:
+            results.append({"code": inp, "error": "无有效数据"})
+        else:
+            results.append(result)
+
+    # 单股时输出对象（向后兼容），多股时输出数组
+    if len(results) == 1:
+        output = results[0]
+        print(json.dumps(output, ensure_ascii=False))
+    else:
+        print(json.dumps(results, ensure_ascii=False))
 
 
 if __name__ == "__main__":

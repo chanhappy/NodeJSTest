@@ -36,30 +36,43 @@ function parseTimes(timesStr) {
 }
 
 /**
- * 计算分时差值
- * @param {Object} opts - { code, from, to, timeStart, timeEnd }
- * @returns {Promise<Object>}
+ * 计算分时差值（支持多股票）
+ * @param {Object} opts - { names, codes, from, to, timeStart, timeEnd }
+ * @returns {Promise<Array<Object>>} 始终返回数组
  */
 function calcTenMinSum(opts = {}) {
   return new Promise((resolve, reject) => {
-    if (opts.name && !opts.code) {
-      findCode(opts.name)
-        .then((code) => {
-          opts.code = code;
-          runCalc(opts).then(resolve).catch(reject);
+    const allCodes = (opts.codes || []).slice();
+    const allNames = (opts.names || []).slice();
+
+    if (allNames.length > 0) {
+      resolveCodes(allNames)
+        .then((resolved) => {
+          // 合并：name查到的code + 直接传入的codes
+          const codeToName = {};
+          resolved.forEach((r) => {
+            allCodes.push(r.code);
+            codeToName[r.code] = r.name;
+          });
+          runCalc(allCodes, opts, codeToName).then(resolve).catch(reject);
         })
         .catch(reject);
     } else {
-      runCalc(opts).then(resolve).catch(reject);
+      runCalc(allCodes, opts, {}).then(resolve).catch(reject);
     }
   });
 }
 
-function runCalc(opts) {
+function runCalc(codes, opts, codeToName) {
   return new Promise((resolve, reject) => {
+    if (codes.length === 0) {
+      reject(new Error("没有有效的转债代码"));
+      return;
+    }
+
     const args = [
       PY_SCRIPT,
-      "--code", opts.code,
+      "--codes", codes.join(","),
       "--from", opts.from,
       "--to", opts.to,
       "--time-start", opts.timeStart || "09:30",
@@ -86,7 +99,13 @@ function runCalc(opts) {
         return;
       }
       try {
-        resolve(JSON.parse(stdout));
+        const results = JSON.parse(stdout);
+        // 注入name到每个结果
+        const items = Array.isArray(results) ? results : [results];
+        items.forEach((r) => {
+          if (codeToName[r.code]) r.name = codeToName[r.code];
+        });
+        resolve(items);
       } catch (e) {
         reject(new Error(`JSON parse: ${e.message}`));
       }
@@ -97,21 +116,24 @@ function runCalc(opts) {
 }
 
 /**
- * 通过名称查代码
+ * 批量通过名称查代码（单次Python调用，返回 {code, name} 数组）
  */
-function findCode(name) {
+function resolveCodes(names) {
   return new Promise((resolve, reject) => {
+    const namesJson = JSON.stringify(names);
     const pyCode = `
 import akshare as ak
+import json
 spot = ak.bond_zh_hs_cov_spot()
 spot = spot[~spot["symbol"].str.startswith("bj")]
-matches = spot[spot["name"].str.contains("${name}", na=False)]
-if len(matches) > 0:
-    sym = str(matches.iloc[0]["symbol"])
-    code = sym[2:] if len(sym) > 2 else sym
-    print(code)
-else:
-    print("NOT_FOUND")
+result = []
+for name in ${namesJson}:
+    matches = spot[spot["name"].str.contains(name, na=False)]
+    if len(matches) > 0:
+        sym = str(matches.iloc[0]["symbol"])
+        code = sym[2:] if len(sym) > 2 else sym
+        result.append({"code": code, "name": name})
+print(json.dumps(result, ensure_ascii=False))
 `;
 
     const proc = spawn(PYTHON, ["-c", pyCode], {
@@ -124,81 +146,212 @@ else:
     proc.stderr.on("data", (chunk) => { process.stderr.write(chunk); });
 
     proc.on("close", (code) => {
-      const result = stdout.trim();
-      if (result === "NOT_FOUND" || code !== 0) {
-        reject(new Error(`未找到: ${name}`));
-      } else {
-        resolve(result);
+      if (code !== 0) {
+        reject(new Error(`批量查代码失败`));
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout));
+      } catch (e) {
+        reject(new Error(`查代码JSON解析失败: ${e.message}`));
       }
     });
   });
 }
 
 /**
- * 格式化输出
+ * 格式化输出（支持单股/多股）
  */
-function printResult(result, showDetails) {
-  const sep = "=".repeat(64);
-  const timeLabel = `${result.time_end} - ${result.time_start}`;
+function printResult(results, showDetails, mode) {
+  const showPrice = mode === "price" || mode === "both";
+  const showPct = mode === "pct" || mode === "both";
+  const sep = "=".repeat(78);
+  const items = Array.isArray(results) ? results : [results];
+  const validItems = items.filter((r) => !r.error);
+  const multiStock = validItems.length > 1;
 
-  console.log(`\n${sep}`);
-  console.log(`  ${result.code} 分时差值 (${timeLabel})`);
-  console.log(
-    `  区间: ${result.from_date} ~ ${result.to_date} | 交易日: ${result.total_trading_days} | 有效: ${result.valid_days}`
-  );
-  console.log(sep);
-  console.log(
-    `  正差值: ${result.positive_count} | 负差值: ${result.negative_count} | 零: ${result.zero_count}`
-  );
-  if (result.empty_days > 0 || result.no_bar_days > 0) {
-    console.log(
-      `  ⚠ 无分钟数据: ${result.empty_days} 天 | 缺少目标bar: ${result.no_bar_days} 天`
-    );
+  if (validItems.length === 0) {
+    console.log("\n无有效数据");
+    return;
   }
-  console.log(
-    `  最大正: ${result.max_positive.diff} (${result.max_positive.date})`
-  );
-  console.log(
-    `  最大负: ${result.max_negative.diff} (${result.max_negative.date})`
-  );
-  console.log(`  差值总和: ${result.total > 0 ? "+" : ""}${result.total.toFixed(3)}`);
-  console.log("  注: 分钟数据覆盖约近1个月，更早日期可能无数据");
-  console.log(sep);
 
-  if (showDetails && result.details && result.details.length > 0) {
-    const ts = result.time_start.padStart(5);
-    const te = result.time_end.padStart(5);
+  const timeLabel = `${validItems[0].time_start} → ${validItems[0].time_end}`;
+
+  if (multiStock) {
+    // ============ 多股对比表 ============
+    console.log(`\n${sep}`);
+    console.log(`  多股分时差值对比 (${timeLabel})`);
     console.log(
-      `\n  ${"日期".padEnd(12)} ${ts.padStart(10)} ${te.padStart(10)} ${"差值".padStart(10)}`
+      `  区间: ${validItems[0].from_date} ~ ${validItems[0].to_date} | 共 ${validItems.length} 只`
     );
-    console.log("  " + "-".repeat(48));
+    console.log(sep);
 
-    result.details.forEach((d) => {
-      let mark = "";
-      if (d.diff === result.max_positive.diff) mark = " ★ 最大正";
-      else if (d.diff === result.max_negative.diff) mark = " ▼ 最大负";
+    let header = `  ${"代码".padEnd(8)} ${"名称".padEnd(10)} ${"交易日".padStart(5)} ${"有效".padStart(4)} `;
+    if (showPrice) {
+      header += `${"价差和".padStart(9)} `;
+    }
+    header += `${"涨/跌/平".padStart(10)}`;
+    if (showPct) {
+      header += ` ${"%和".padStart(9)}`;
+    }
+    console.log(header);
+    console.log("  " + "-".repeat(65));
 
-      console.log(
-        `  ${d.date.padEnd(12)} ${d.price_start.toFixed(3).padStart(10)} ${d.price_end.toFixed(3).padStart(10)} ${d.diff > 0 ? "+" : ""}${d.diff.toFixed(3).padStart(9)}${mark}`
-      );
+    validItems.forEach((r) => {
+      let line = `  ${r.code.padEnd(8)} ${(r.name || r.code).padEnd(10)} ${String(r.total_trading_days).padStart(5)} ${String(r.valid_days).padStart(4)} `;
+      if (showPrice) {
+        const totalStr = r.total > 0 ? "+" + r.total.toFixed(2) : r.total.toFixed(2);
+        line += `${totalStr.padStart(9)} `;
+      }
+      line += `${(r.positive_count + "/" + r.negative_count + "/" + r.zero_count).padStart(10)}`;
+      if (showPct) {
+        const pctStr = r.pct_total > 0 ? "+" + r.pct_total.toFixed(2) : r.pct_total.toFixed(2);
+        line += ` ${pctStr.padStart(8)}%`;
+      }
+      console.log(line);
     });
 
-    console.log(`\n${sep}\n`);
+    console.log(sep);
+
+    // 单品明细
+    if (showDetails) {
+      validItems.forEach((r) => {
+        printSingleDetail(r, showPrice, showPct);
+      });
+    }
+  } else {
+    // ============ 单股详情 ============
+    const r = validItems[0];
+    console.log(`\n${sep}`);
+    console.log(`  ${r.code}${r.name ? " " + r.name : ""} 分时差值 (${timeLabel})`);
+    console.log(
+      `  区间: ${r.from_date} ~ ${r.to_date} | 交易日: ${r.total_trading_days} | 有效: ${r.valid_days}`
+    );
+    console.log(sep);
+
+    if (showPrice) {
+      console.log(
+        `  [价格差值] 正: ${r.positive_count} | 负: ${r.negative_count} | 零: ${r.zero_count}`
+      );
+      console.log(`  最大正: ${r.max_positive.diff} (${r.max_positive.date})`);
+      console.log(`  最大负: ${r.max_negative.diff} (${r.max_negative.date})`);
+      console.log(`  差值总和: ${r.total > 0 ? "+" : ""}${r.total.toFixed(3)}`);
+    }
+
+    if (showPct) {
+      console.log(
+        `  [百分比差值] 正: ${r.pct_positive_count} | 负: ${r.pct_negative_count} | 零: ${r.pct_zero_count}`
+      );
+      if (r.max_pct_positive) {
+        console.log(
+          `  最大正%: ${r.max_pct_positive.pct_diff > 0 ? "+" : ""}${r.max_pct_positive.pct_diff}% (${r.max_pct_positive.date})`
+        );
+      }
+      if (r.max_pct_negative) {
+        console.log(
+          `  最大负%: ${r.max_pct_negative.pct_diff > 0 ? "+" : ""}${r.max_pct_negative.pct_diff}% (${r.max_pct_negative.date})`
+        );
+      }
+      console.log(
+        `  百分比差值总和: ${r.pct_total > 0 ? "+" : ""}${r.pct_total.toFixed(3)}%`
+      );
+    }
+
+    if (r.empty_days > 0 || r.no_bar_days > 0) {
+      console.log(
+        `  ⚠ 无分钟数据: ${r.empty_days} 天 | 缺少目标bar: ${r.no_bar_days} 天`
+      );
+    }
+    console.log("  注: 分钟数据覆盖约近1个月，更早日期可能无数据");
+    console.log(sep);
+
+    if (showDetails) {
+      printSingleDetail(r, showPrice, showPct);
+    }
   }
+
+  // 错误股票
+  const errItems = items.filter((r) => r.error);
+  if (errItems.length > 0) {
+    console.log(`\n  跳过: ${errItems.map((e) => e.code).join(", ")}（无有效数据）`);
+  }
+}
+
+/**
+ * 输出单个转债的明细表
+ */
+function printSingleDetail(r, showPrice, showPct) {
+  if (!r.details || r.details.length === 0) return;
+
+  const label = r.name ? `${r.code} ${r.name}` : r.code;
+  console.log(`\n  ── ${label} ──`);
+
+  const ts = r.time_start.padStart(5);
+  const te = r.time_end.padStart(5);
+
+  let header = `  ${"日期".padEnd(12)} ${ts.padStart(10)} ${te.padStart(10)} `;
+  if (showPrice) header += `${"差值".padStart(10)}`;
+  if (showPct) header += ` ${"涨跌%".padStart(9)}`;
+  console.log(header);
+  console.log("  " + "-".repeat(48));
+
+  r.details.forEach((d) => {
+    let line = `  ${d.date.padEnd(12)} ${d.price_start.toFixed(3).padStart(10)} ${d.price_end.toFixed(3).padStart(10)} `;
+    let marks = [];
+
+    if (showPrice) {
+      const diffStr = d.diff > 0 ? "+" + d.diff.toFixed(3) : d.diff.toFixed(3);
+      line += `${diffStr.padStart(10)}`;
+      if (r.max_positive && d.diff === r.max_positive.diff) marks.push("价格最大正");
+      if (r.max_negative && d.diff === r.max_negative.diff) marks.push("价格最大负");
+    }
+    if (showPct) {
+      const pd = d.pct_diff > 0 ? "+" + d.pct_diff.toFixed(2) : d.pct_diff.toFixed(2);
+      line += ` ${pd.padStart(9)}%`;
+      if (r.max_pct_positive && d.pct_diff === r.max_pct_positive.pct_diff) marks.push("%最大正");
+      if (r.max_pct_negative && d.pct_diff === r.max_pct_negative.pct_diff) marks.push("%最大负");
+    }
+    if (marks.length > 0) line += `  ◆ ${marks.join(", ")}`;
+
+    console.log(line);
+  });
 }
 
 // ============ 主流程 ============
 async function main() {
   const args = process.argv.slice(2);
-  const opts = { name: "", code: "", from: "", to: "", timeStart: "09:30", timeEnd: "09:40" };
+  const opts = { names: [], codes: [], from: "", to: "", timeStart: "09:30", timeEnd: "09:40" };
   let showDetails = false;
+  let mode = "both";  // price | pct | both
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--name" && args[i + 1]) {
-      opts.name = args[i + 1];
-      if (/^\d+$/.test(opts.name)) {
-        opts.code = opts.name;
+      const val = args[i + 1];
+      if (/^\d+$/.test(val)) {
+        opts.codes.push(val);
+      } else {
+        opts.names.push(val);
       }
+      i++;
+    } else if (args[i] === "--names" && args[i + 1]) {
+      args[i + 1].split(",").forEach((s) => {
+        const val = s.trim();
+        if (!val) return;
+        if (/^\d+$/.test(val)) {
+          opts.codes.push(val);
+        } else {
+          opts.names.push(val);
+        }
+      });
+      i++;
+    } else if (args[i] === "--code" && args[i + 1]) {
+      opts.codes.push(args[i + 1]);
+      i++;
+    } else if (args[i] === "--codes" && args[i + 1]) {
+      args[i + 1].split(",").forEach((s) => {
+        const val = s.trim();
+        if (val) opts.codes.push(val);
+      });
       i++;
     } else if (args[i] === "--from" && args[i + 1]) {
       opts.from = args[i + 1];
@@ -218,8 +371,21 @@ async function main() {
       i++;
     } else if (args[i] === "--detail" || args[i] === "-d") {
       showDetails = true;
+    } else if (args[i] === "--mode" && args[i + 1]) {
+      const m = args[i + 1].toLowerCase();
+      if (["price", "pct", "both"].includes(m)) {
+        mode = m;
+      } else {
+        console.error(`错误: --mode 参数必须为 price/pct/both，当前: "${args[i + 1]}"`);
+        process.exit(1);
+      }
+      i++;
     }
   }
+
+  // 去重
+  opts.names = [...new Set(opts.names)];
+  opts.codes = [...new Set(opts.codes)];
 
   // 快捷年份模式
   if (opts.from && opts.from.length === 4 && /^\d{4}$/.test(opts.from)) {
@@ -227,12 +393,22 @@ async function main() {
     opts.from = `${opts.from}0101`;
   }
 
-  if (!opts.code && !opts.name) {
-    console.log("用法: node diff-ten-min-sum.js --name <转债名称或代码> --from <YYYYMMDD> --to <YYYYMMDD> [--times HH:MM-HH:MM] [-d]");
+  const totalStocks = opts.names.length + opts.codes.length;
+  if (totalStocks === 0) {
+    console.log("用法: node minutes-diff-sum.js --name <转债名称或代码> --from <YYYYMMDD> --to <YYYYMMDD> [选项]");
+    console.log("选项:");
+    console.log("  --name <名称|代码>       指定单个转债（可多次使用）");
+    console.log("  --names <名1,名2,...>    逗号分隔多个转债（可混用代码/名称）");
+    console.log("  --code <代码>            直接指定代码");
+    console.log("  --codes <代码1,代码2>    逗号分隔多个代码");
+    console.log("  --times HH:MM-HH:MM      时间段 (默认 09:30-09:40)");
+    console.log("  --mode price|pct|both    输出模式 (默认 both)");
+    console.log("  -d, --detail             显示每日明细");
     console.log("示例:");
-    console.log("  node diff-ten-min-sum.js --name 声迅转债 --from 20260101 --to 20260703");
-    console.log("  node diff-ten-min-sum.js --name 127080 --from 20260701 --to 20260703 --times 10:30-13:10");
-    console.log("  node diff-ten-min-sum.js --name 超达转债 --from 2026 --times 09:35-09:45 -d");
+    console.log("  node minutes-diff-sum.js --name 声迅转债 --from 2026 --mode pct -d");
+    console.log("  node minutes-diff-sum.js --names 声迅转债,超达转债 --from 2026 --mode pct -d");
+    console.log("  node minutes-diff-sum.js --codes 127080,123231 --from 20260101 --to 20260706");
+    console.log("  node minutes-diff-sum.js --name 声迅转债 --name 超达转债 --from 2026");
     console.log("\n默认时段: 09:30-09:40");
     process.exit(1);
   }
@@ -243,21 +419,19 @@ async function main() {
   }
 
   console.log(`\n可转债分时差值计算`);
-  const idStr = opts.code || opts.name;
-  console.log(`参数: code/name=${idStr}, from=${opts.from}, to=${opts.to}, times=${opts.timeStart}-${opts.timeEnd}\n`);
+  const labelParts = [];
+  if (opts.names.length > 0) labelParts.push(opts.names.join(", "));
+  if (opts.codes.length > 0) labelParts.push(opts.codes.join(", "));
+  console.log(`目标: ${labelParts.join(" | ")}`);
+  console.log(`参数: from=${opts.from}, to=${opts.to}, times=${opts.timeStart}-${opts.timeEnd}, mode=${mode}`);
   console.log(`提示: ${opts.timeStart}用对应K线开盘价, ${opts.timeEnd}用对应K线收盘价\n`);
 
   try {
     const startTime = Date.now();
-    const result = await calcTenMinSum(opts);
+    const results = await calcTenMinSum(opts);
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
 
-    if (result.error) {
-      console.error(`错误: ${result.error}`);
-      process.exit(1);
-    }
-
-    printResult(result, showDetails);
+    printResult(results, showDetails, mode);
     console.log(`耗时: ${elapsed}s`);
   } catch (err) {
     console.error(`\n错误: ${err.message}`);
@@ -273,15 +447,25 @@ module.exports = { calcTenMinSum };
 
 
 
-// # 默认 09:30→09:40
-// node minutes-diff-sum.js --name 127080 --from 20260701 --to 20260703
+// # 单股
+// node minutes-diff-sum.js --name 声迅转债 --from 2026 --mode pct -d
+//
+// # 多股（逗号分隔）
+// node minutes-diff-sum.js --names 声迅转债,超达转债 --from 2026 --mode pct
+//
+// # 多股（多次 --name）
+// node minutes-diff-sum.js --name 声迅转债 --name 超达转债 --from 20260101 --to 20260706
+//
+// # 混合名称和代码
+// node minutes-diff-sum.js --names 声迅转债,123231 --from 2026 --mode pct -d
+//
+// # 多股对比 + 明细
+// node minutes-diff-sum.js --names 声迅转债,超达转债,127080 --from 2026 --mode pct -d
 
 // # 自定义时段
-// node minutes-diff-sum.js --name 声迅转债 --from 20260620 --to 20260703 --times "10:30-13:10" -d
+// node minutes-diff-sum.js --names 声迅转债,蓝晓转02,大中转债 --from 20260120 --to 20260703 --times "11:20-13:10" -d
+// node minutes-diff-sum.js --names 声迅转债,蓝晓转02,大中转债 --from 20260120 --to 20260703 --times "9:30-9:40" -d
+// node minutes-diff-sum.js --names 声迅转债,蓝晓转02,大中转债,惠城转债,福新转债,超达转债,联瑞转债,泰坦转债 --from 2026 --times "11:00-13:05" -d
 
-// # 尾盘5分钟
-// node minutes-diff-sum.js --name 127080 --from 2026 --times "14:55-15:00"
-// 参数	说明
-// --times 09:30-09:40	默认值，开盘后10分钟差值
-// --times 10:30-13:10	早盘价 vs 下午开盘价差值
-// --times 14:55-15:00	尾盘最后5分钟差值
+
+// node minutes-diff-sum.js --names 声迅转债,蓝晓转02,大中转债,惠城转债,福新转债,超达转债,联瑞转债,泰坦转债 --from 2026 --times "9:30-9:40" -d
