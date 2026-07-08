@@ -8,9 +8,14 @@
 import sys
 import json
 import argparse
+import socket
+import os
 from datetime import datetime
 import akshare as ak
 import pandas as pd
+
+# 防止网络请求挂死：全局 socket 超时 30 秒
+socket.setdefaulttimeout(30)
 
 
 # ==================== 参数 ====================
@@ -119,9 +124,14 @@ def calc_diff_sum(name_or_code, from_date, to_date, threshold=DROP_THRESHOLD):
     sys.stderr.write(f"查询: {name}({code}) {from_date} ~ {to_date} | 大盘跌超{abs(threshold)}%\n")
 
     # 1. 获取可转债日线
-    df = ak.bond_zh_hs_cov_daily(symbol=symbol_full)
-    if df.empty:
-        sys.stderr.write("未获取到数据\n")
+    try:
+        df = ak.bond_zh_hs_cov_daily(symbol=symbol_full)
+    except Exception as e:
+        sys.stderr.write(f"日线数据异常({code}): {e}\n")
+        return None
+
+    if df.empty or "date" not in df.columns:
+        sys.stderr.write(f"日线数据为空或缺少日期列({code})\n")
         return None
 
     df["date"] = pd.to_datetime(df["date"])
@@ -239,9 +249,11 @@ def main():
 
     if result is None:
         print(json.dumps({"error": "计算失败"}, ensure_ascii=False))
-        sys.exit(1)
-
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)  # 立即退出，避免 akshare 的后台线程/atexit 导致进程卡死
 
 
 if __name__ == "__main__":

@@ -84,6 +84,18 @@ function runCalc(codes, opts, codeToName) {
       env: { ...process.env, PYTHONIOENCODING: "utf-8" },
     });
 
+    const TIMEOUT_MS = Math.max(codes.length * 30000, 90000);
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        process.stderr.write(`\n  ⚠ 超时 (${TIMEOUT_MS / 1000}s)，强制终止...\n`);
+        proc.kill("SIGKILL");
+        reject(new Error(`计算超时 (${TIMEOUT_MS / 1000}s)`));
+      }
+    }, TIMEOUT_MS);
+
     let stdout = "";
     let stderr = "";
 
@@ -94,6 +106,9 @@ function runCalc(codes, opts, codeToName) {
     });
 
     proc.on("close", (code) => {
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
       if (code !== 0) {
         reject(new Error(`Python exit ${code}: ${stderr}`));
         return;
@@ -204,8 +219,22 @@ function printResult(results, showDetails, mode) {
     );
     console.log(sep);
 
+    // 按红率降序排列
+    validItems.sort((a, b) => {
+      const zcA = a.zero_count != null ? a.zero_count : 0;
+      const zcB = b.zero_count != null ? b.zero_count : 0;
+      const totalA = a.positive_count + a.negative_count + zcA;
+      const totalB = b.positive_count + b.negative_count + zcB;
+      const rateA = totalA > 0 ? a.positive_count / totalA : 0;
+      const rateB = totalB > 0 ? b.positive_count / totalB : 0;
+      return rateB - rateA;
+    });
+
     // 构建表格数据行
     const rows = validItems.map((r) => {
+      const zc = r.zero_count != null ? r.zero_count : 0;
+      const bullTotal = r.positive_count + r.negative_count + zc;
+      const bullRate = bullTotal > 0 ? (r.positive_count / bullTotal * 100).toFixed(1) : "0.0";
       const totalStr = r.total > 0 ? "+" + r.total.toFixed(2) : r.total.toFixed(2);
       const pctStr = r.pct_total > 0 ? "+" + r.pct_total.toFixed(2) : r.pct_total.toFixed(2);
       return {
@@ -214,7 +243,8 @@ function printResult(results, showDetails, mode) {
         days: String(r.total_trading_days),
         valid: String(r.valid_days),
         total: totalStr,
-        pnz: r.positive_count + "/" + r.negative_count + "/" + r.zero_count,
+        pnz: r.positive_count + "/" + r.negative_count + "/" + zc,
+        bullRate: bullRate + "%",
         pctTotal: pctStr + "%",
       };
     });
@@ -226,6 +256,7 @@ function printResult(results, showDetails, mode) {
     const aligns = ["right", "right", "right", "right"];
     if (showPrice) { headers.push("价差和"); keys.push("total"); aligns.push("right"); }
     headers.push("涨/跌/平"); keys.push("pnz"); aligns.push("right");
+    headers.push("红率"); keys.push("bullRate"); aligns.push("right");
     if (showPct) { headers.push("%和"); keys.push("pctTotal"); aligns.push("right"); }
 
     const colWidths = headers.map((h, i) => {
@@ -272,8 +303,11 @@ function printResult(results, showDetails, mode) {
     console.log(sep);
 
     if (showPrice) {
+      const zc = r.zero_count != null ? r.zero_count : 0;
+      const bullTotal = r.positive_count + r.negative_count + zc;
+      const bullRate = bullTotal > 0 ? (r.positive_count / bullTotal * 100).toFixed(1) : "0.0";
       console.log(
-        `  [价格差值] 正: ${r.positive_count} | 负: ${r.negative_count} | 零: ${r.zero_count}`
+        `  [价格差值] 正: ${r.positive_count} | 负: ${r.negative_count} | 零: ${zc} | 红率: ${bullRate}%`
       );
       console.log(`  最大正: ${r.max_positive.diff} (${r.max_positive.date})`);
       console.log(`  最大负: ${r.max_negative.diff} (${r.max_negative.date})`);
@@ -488,26 +522,17 @@ if (require.main === module) {
 module.exports = { calcTenMinSum };
 
 
-
-// # 单股
-// node minutes-diff-sum.js --name 声迅转债 --from 2026 --mode pct -d
-//
-// # 多股（逗号分隔）
-// node minutes-diff-sum.js --names 声迅转债,超达转债 --from 2026 --mode pct
-//
-// # 多股（多次 --name）
-// node minutes-diff-sum.js --name 声迅转债 --name 超达转债 --from 20260101 --to 20260706
-//
-// # 混合名称和代码
-// node minutes-diff-sum.js --names 声迅转债,123231 --from 2026 --mode pct -d
-//
-// # 多股对比 + 明细
-// node minutes-diff-sum.js --names 声迅转债,超达转债,127080 --from 2026 --mode pct -d
-
-// # 自定义时段
-// node minutes-diff-sum.js --names 声迅转债,蓝晓转02,大中转债 --from 20260120 --to 20260703 --times "11:20-13:10" -d
 // node minutes-diff-sum.js --names 声迅转债,蓝晓转02,大中转债 --from 20260120 --to 20260703 --times "9:30-9:40" -d
 // node minutes-diff-sum.js --names 声迅转债,蓝晓转02,大中转债,惠城转债,福新转债,超达转债,联瑞转债,泰坦转债 --from 2026 --times "11:00-13:05" -d
 
 
 // node minutes-diff-sum.js --names 声迅转债,蓝晓转02,大中转债,惠城转债,福新转债,超达转债,联瑞转债,泰坦转债 --from 2026 --times "9:30-9:40" -d
+
+// # 全量扫描，默认时段 09:30-09:40
+// node minutes-diff-sum-all.js --from 2026
+
+// # 红率 TOP 30
+// node minutes-diff-sum-all.js --from 2026 --limit 30
+
+// # 自定义时段
+// node minutes-diff-sum-all.js --from 20260501 --to 20260708 --times "9:30-9:40" --limit 30

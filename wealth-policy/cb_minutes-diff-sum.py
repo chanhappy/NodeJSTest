@@ -12,9 +12,14 @@
 import sys
 import json
 import argparse
+import socket
+import os
 from datetime import datetime
 import akshare as ak
 import pandas as pd
+
+# 防止网络请求挂死：全局 socket 超时 30 秒
+socket.setdefaulttimeout(30)
 
 
 def add_minutes(time_str, minutes):
@@ -49,9 +54,14 @@ def get_time_diff(code, from_date, to_date, time_start="09:30", time_end="09:40"
     )
 
     # 1. 获取日线确定交易日
-    df_daily = ak.bond_zh_hs_cov_daily(symbol=symbol_full)
-    if df_daily.empty:
-        sys.stderr.write("日线数据为空\n")
+    try:
+        df_daily = ak.bond_zh_hs_cov_daily(symbol=symbol_full)
+    except Exception as e:
+        sys.stderr.write(f"日线数据异常({code}): {e}\n")
+        return None
+
+    if df_daily.empty or "date" not in df_daily.columns:
+        sys.stderr.write(f"日线数据为空或缺少日期列({code})\n")
         return None
 
     df_daily["date"] = pd.to_datetime(df_daily["date"])
@@ -228,16 +238,24 @@ def main():
     for i, code in enumerate(codes):
         if len(codes) > 1:
             sys.stderr.write(f"\n[{i+1}/{len(codes)}] ")
-        result = get_time_diff(
-            code, args.from_date, args.to_date,
-            args.time_start, args.time_end
-        )
+        try:
+            result = get_time_diff(
+                code, args.from_date, args.to_date,
+                args.time_start, args.time_end
+            )
+        except Exception as e:
+            sys.stderr.write(f"处理异常({code}): {e}\n")
+            result = None
         if result is None:
             results.append({"code": code, "error": "无有效数据"})
         else:
             results.append(result)
 
     print(json.dumps(results, ensure_ascii=False))
+    sys.stdout.flush()
+    sys.stderr.write(f"完成 {len(results)} 条结果，有效 {sum(1 for r in results if 'error' not in r)} 条\n")
+    sys.stderr.flush()
+    os._exit(0)  # 立即退出，避免 akshare 的后台线程/atexit 导致进程卡死
 
 
 if __name__ == "__main__":

@@ -12,7 +12,11 @@ import sys
 import os
 import json
 import argparse
+import socket
 from datetime import datetime
+
+# 防止网络请求挂死：全局 socket 超时 30 秒
+socket.setdefaulttimeout(30)
 
 # 输出初始化提示，避免 akshare 加载期间用户误以为卡死
 sys.stderr.write("正在初始化 Python 环境...\n")
@@ -94,9 +98,14 @@ def get_time_diff_with_turnover(code, from_date, to_date,
 
     # 2. 获取日线数据
     log_stderr("正在获取日线数据...")
-    df_daily = ak.bond_zh_hs_cov_daily(symbol=symbol_full)
-    if df_daily.empty:
-        log_stderr("日线数据为空")
+    try:
+        df_daily = ak.bond_zh_hs_cov_daily(symbol=symbol_full)
+    except Exception as e:
+        log_stderr(f"日线数据异常({code}): {e}")
+        return None
+
+    if df_daily.empty or "date" not in df_daily.columns:
+        log_stderr(f"日线数据为空或缺少日期列({code})")
         return None
 
     df_daily["date"] = pd.to_datetime(df_daily["date"])

@@ -483,4 +483,4 @@ module.exports = { calcDiffSum };
 // # 用代码代替名称
 // node days-diff-sum-ex.js --name 127080 --from 20260101 --to 20260703
 // # 多股对比
-// node days-diff-sum-ex.js --names 声迅转债,蓝晓转02,大中转债,惠城转债,福新转债,超达转债,联瑞转债,精测转02,欧通转债,宏微转债,水羊转债 --from 2026 -d
+// node days-diff-sum-ex.js --names 声迅转债,蓝晓转02,大中转债,惠城转债,福新转债,超达转债,联瑞转债,精测转02,欧通转债,宏微转债,珂玛转债 --from 2026 -d
