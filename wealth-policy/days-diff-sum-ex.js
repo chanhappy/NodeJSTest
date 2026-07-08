@@ -1,19 +1,19 @@
 /**
- * days-diff-sum.js - 可转债隔夜跳空差值计算工具
+ * days-diff-sum-ex.js - 可转债隔夜跳空差值计算工具（次日9:40版）
  *
- * 计算规则: sum(次日开盘价 - 当日收盘价)
- * 数据源: akshare → bond_zh_hs_cov_daily
+ * 计算规则: sum(次日9:40价格 - 当日收盘价)
+ * 数据源: akshare → bond_zh_hs_cov_daily + stock_zh_a_minute (5分钟K线)
  *
  * 用法:
- *   node days-diff-sum.js --name 声迅转债 --from 20260101 --to 20260703
- *   node days-diff-sum.js --names 声迅转债,超达转债 --from 2026
- *   node days-diff-sum.js --code 127080 --from 20260101 --to 20260703
+ *   node days-diff-sum-ex.js --name 声迅转债 --from 20260101 --to 20260703
+ *   node days-diff-sum-ex.js --names 声迅转债,超达转债 --from 2026
+ *   node days-diff-sum-ex.js --code 127080 --from 20260101 --to 20260703
  */
 
 const { spawn } = require("child_process");
 const path = require("path");
 
-const PY_SCRIPT = path.join(__dirname, "cb_days-diff-sum.py");
+const PY_SCRIPT = path.join(__dirname, "cb_days-diff-sum-ex.py");
 const PYTHON = "python";
 
 /**
@@ -134,12 +134,29 @@ print(json.dumps(result, ensure_ascii=False))
 }
 
 /**
+ * 计算字符串视觉宽度（中文/全角=2，英文/半角=1）
+ */
+function vw(s) {
+  let w = 0;
+  for (const ch of s) {
+    const c = ch.charCodeAt(0);
+    w += (c > 0x7f || c === 0xff0c) ? 2 : 1;
+  }
+  return w;
+}
+
+/** 视觉宽度左填充 */
+function vpl(s, w) { const n = w - vw(s); return n > 0 ? s + " ".repeat(n) : s; }
+
+/** 视觉宽度右填充 */
+function vpr(s, w) { const n = w - vw(s); return n > 0 ? " ".repeat(n) + s : s; }
+
+/**
  * 格式化输出结果（支持单股/多股）
  */
 function printResult(results, showDetails, mode) {
   const showPrice = mode === "price" || mode === "both";
   const showPct = mode === "pct" || mode === "both";
-  const sep = "=".repeat(78);
   const items = Array.isArray(results) ? results : [results];
   const validItems = items.filter((r) => !r.error);
   const multiStock = validItems.length > 1;
@@ -151,6 +168,7 @@ function printResult(results, showDetails, mode) {
 
   if (multiStock) {
     // ============ 多股对比表 ============
+    const sep = "=".repeat(78);
     console.log(`\n${sep}`);
     console.log(`  多股隔夜跳空对比`);
     console.log(
@@ -169,33 +187,65 @@ function printResult(results, showDetails, mode) {
       return rateB - rateA;
     });
 
-    let header = `  ${"代码".padEnd(8)} ${"名称".padEnd(10)} ${"交易日".padStart(5)} ${"差价对".padStart(5)} `;
-    if (showPrice) {
-      header += `${"价差和".padStart(9)} `;
-    }
-    header += `${"涨/跌/平".padStart(10)} ${"红率".padStart(7)}`;
-    if (showPct) {
-      header += ` ${"%和".padStart(9)}`;
-    }
-    console.log(header);
-    console.log("  " + "-".repeat(78));
-
-    validItems.forEach((r) => {
-      let line = `  ${r.code.padEnd(8)} ${(r.name || r.code).padEnd(10)} ${String(r.trading_days).padStart(5)} ${String(r.pairs).padStart(5)} `;
-      if (showPrice) {
-        const totalStr = r.total > 0 ? "+" + r.total.toFixed(2) : r.total.toFixed(2);
-        line += `${totalStr.padStart(9)} `;
-      }
+    // 构建表格数据行
+    const rows = validItems.map((r) => {
       const pc = r.zero_count != null ? r.zero_count : (r.pairs - r.positive_count - r.negative_count);
-      line += `${(r.positive_count + "/" + r.negative_count + "/" + pc).padStart(10)}`;
-      // 红率 = 涨次数 / (涨+跌+平)
       const bullTotal = r.positive_count + r.negative_count + pc;
       const bullRate = bullTotal > 0 ? (r.positive_count / bullTotal * 100).toFixed(1) : "0.0";
-      line += ` ${bullRate.padStart(6)}%`;
-      if (showPct) {
-        const pctStr = r.pct_total > 0 ? "+" + r.pct_total.toFixed(2) : r.pct_total.toFixed(2);
-        line += ` ${pctStr.padStart(8)}%`;
-      }
+      const totalStr = r.total > 0 ? "+" + r.total.toFixed(2) : r.total.toFixed(2);
+      const pctStr = r.pct_total > 0 ? "+" + r.pct_total.toFixed(2) : r.pct_total.toFixed(2);
+      return {
+        code: r.code,
+        name: (r.name || r.code).slice(0, 10),
+        days: String(r.trading_days),
+        pairs: String(r.pairs),
+        total: totalStr,
+        pnz: r.positive_count + "/" + r.negative_count + "/" + pc,
+        bullRate: bullRate + "%",
+        pctTotal: pctStr + "%",
+      };
+    });
+
+    // 计算每列最大视觉宽度（标题也参与）
+    const headers = ["代码", "名称", "交易日", "差价对"];
+    const keys = ["code", "name", "days", "pairs"];
+    // 全部右对齐：标题与数据列在同一基准线对齐
+    const aligns = ["right", "right", "right", "right"];
+    if (showPrice) { headers.push("价差和"); keys.push("total"); aligns.push("right"); }
+    headers.push("涨/跌/平"); keys.push("pnz"); aligns.push("right");
+    headers.push("红率"); keys.push("bullRate"); aligns.push("right");
+    if (showPct) { headers.push("%和"); keys.push("pctTotal"); aligns.push("right"); }
+
+    const colWidths = headers.map((h, i) => {
+      const hw = vw(h);
+      let mw = hw;
+      rows.forEach((row) => {
+        const w = vw(String(row[keys[i]]));
+        if (w > mw) mw = w;
+      });
+      return mw + 2; // 列间距
+    });
+
+    // 输出标题行（右对齐，与数据列保持一致）
+    let headerLine = "  ";
+    headers.forEach((h, i) => {
+      const w = colWidths[i];
+      headerLine += vpr(h, w);
+    });
+    console.log(headerLine);
+
+    // 输出分隔线
+    const totalWidth = colWidths.reduce((a, b) => a + b, 0);
+    console.log("  " + "-".repeat(totalWidth));
+
+    // 输出数据行
+    rows.forEach((row) => {
+      let line = "  ";
+      keys.forEach((k, i) => {
+        const val = String(row[k]);
+        const w = colWidths[i];
+        line += (aligns[i] === "right") ? vpr(val, w) : vpl(val, w);
+      });
       console.log(line);
     });
 
@@ -212,11 +262,14 @@ function printResult(results, showDetails, mode) {
     const r = validItems[0];
     console.log(`\n${sep}`);
     console.log(
-      `  ${r.name || r.code}（${r.code}）隔夜跳空差值计算`
+      `  ${r.name || r.code}（${r.code}）隔夜跳空（次日9:40）差值计算`
     );
     console.log(
       `  区间: ${r.from_date} ~ ${r.to_date} | 交易日: ${r.trading_days} | 差值对: ${r.pairs}`
     );
+    if (r.skipped_no_0940 != null && r.skipped_no_0940 > 0) {
+      console.log(`  缺9:40数据跳过: ${r.skipped_no_0940} 天 | 有效配对: ${r.valid_pairs}`);
+    }
     console.log(sep);
     console.log(
       `  首日收盘: ${r.first_close.toFixed(3)}  →  末日收盘: ${r.last_close.toFixed(3)}  |  区间涨跌: ${r.price_change > 0 ? "+" : ""}${r.price_change.toFixed(3)}`
@@ -271,7 +324,7 @@ function printSingleDetail(r, showPrice, showPct) {
   const label = r.name ? `${r.code} ${r.name}` : r.code;
   console.log(`\n  ── ${label} ──`);
 
-  let header = `\n  ${"日期".padEnd(12)} ${"→ 次日".padEnd(12)} ${"收盘".padStart(10)} ${"开盘".padStart(10)} `;
+  let header = `\n  ${"日期".padEnd(12)} ${"→ 次日".padEnd(12)} ${"收盘".padStart(10)} ${"9:40价".padStart(10)} `;
   if (showPrice) header += `${"差值".padStart(10)}`;
   if (showPct) header += ` ${"涨跌%".padStart(9)}`;
   header += `  ${"标记"}`;
@@ -279,7 +332,10 @@ function printSingleDetail(r, showPrice, showPct) {
   console.log("  " + "-".repeat(68));
 
   r.details.forEach((d) => {
-    let line = `  ${d.date.padEnd(12)} ${d.next_date.padEnd(12)} ${d.close.toFixed(3).padStart(10)} ${d.next_open.toFixed(3).padStart(10)} `;
+    // 跳过缺09:40数据的条目
+    if (d.next_0940 == null) return;
+
+    let line = `  ${d.date.padEnd(12)} ${d.next_date.padEnd(12)} ${d.close.toFixed(3).padStart(10)} ${d.next_0940.toFixed(3).padStart(10)} `;
     let marks = [];
 
     if (showPrice) {
@@ -371,7 +427,7 @@ async function main() {
 
   const totalStocks = opts.names.length + opts.codes.length;
   if (totalStocks === 0) {
-    console.log("用法: node days-diff-sum.js --name <转债名称或代码> --from <YYYYMMDD> --to <YYYYMMDD> [选项]");
+    console.log("用法: node days-diff-sum-ex.js --name <转债名称或代码> --from <YYYYMMDD> --to <YYYYMMDD> [选项]");
     console.log("选项:");
     console.log("  --name <名称|代码>       指定单个转债（可多次使用）");
     console.log("  --names <名1,名2,...>    逗号分隔多个转债");
@@ -379,11 +435,12 @@ async function main() {
     console.log("  --codes <代码1,代码2>    逗号分隔多个代码");
     console.log("  --mode price|pct|both    输出模式 (默认 both)");
     console.log("  -d, --detail             显示每日明细");
+    console.log("计算规则: 次日9:40价格 - 当日收盘价");
     console.log("示例:");
-    console.log("  node days-diff-sum.js --name 声迅转债 --from 20260101 --to 20260703");
-    console.log("  node days-diff-sum.js --name 127080 --from 2026                # 快捷年份模式");
-    console.log("  node days-diff-sum.js --name 超达转债 --from 2026 --mode pct -d   # 仅看百分比");
-    console.log("  node days-diff-sum.js --names 声迅转债,超达转债 --from 2026 -d    # 多股对比");
+    console.log("  node days-diff-sum-ex.js --name 声迅转债 --from 20260101 --to 20260703");
+    console.log("  node days-diff-sum-ex.js --name 127080 --from 2026                # 快捷年份模式");
+    console.log("  node days-diff-sum-ex.js --name 超达转债 --from 2026 --mode pct -d   # 仅看百分比");
+    console.log("  node days-diff-sum-ex.js --names 声迅转债,超达转债 --from 2026 -d    # 多股对比");
     process.exit(1);
   }
 
@@ -422,17 +479,8 @@ module.exports = { calcDiffSum };
 
 
 // # 基本用法：名称 + 日期区间
-// node diff-sum.js --name 声迅转债 --from 20260101 --to 20260703
-
-// # 快捷年份模式：--from 2026 自动补全整年
-// node diff-sum.js --name 超达转债 --from 2026
-
+// node days-diff-sum-ex.js --name 声迅转债 --from 20260101 --to 20260703
 // # 用代码代替名称
-// node diff-sum.js --name 127080 --from 20260101 --to 20260703
-
-// # 显示每日明细（-d）
-// node days-diff-sum.js --name 蓝晓转02 --from 2026 -d
-//
+// node days-diff-sum-ex.js --name 127080 --from 20260101 --to 20260703
 // # 多股对比
-// node days-diff-sum.js --names 声迅转债,蓝晓转02,大中转债 --from 2026 -d
-// node days-diff-sum.js --names 声迅转债,蓝晓转02,大中转债,惠城转债,福新转债,超达转债,联瑞转债,欧通转债,银轮转债,精达转债,华医转债,永吉转债,科蓝转债,正元转02,垒知转债,宏微转债,水羊转债,大参转债,国力转债 --from 2026 -d
+// node days-diff-sum-ex.js --names 声迅转债,蓝晓转02,大中转债,惠城转债,福新转债,超达转债,联瑞转债,精测转02,欧通转债,宏微转债,水羊转债 --from 2026 -d

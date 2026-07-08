@@ -160,12 +160,29 @@ print(json.dumps(result, ensure_ascii=False))
 }
 
 /**
+ * 计算字符串视觉宽度（中文/全角=2，英文/半角=1）
+ */
+function vw(s) {
+  let w = 0;
+  for (const ch of s) {
+    const c = ch.charCodeAt(0);
+    w += (c > 0x7f || c === 0xff0c) ? 2 : 1;
+  }
+  return w;
+}
+
+/** 视觉宽度左填充 */
+function vpl(s, w) { const n = w - vw(s); return n > 0 ? s + " ".repeat(n) : s; }
+
+/** 视觉宽度右填充 */
+function vpr(s, w) { const n = w - vw(s); return n > 0 ? " ".repeat(n) + s : s; }
+
+/**
  * 格式化输出（支持单股/多股）
  */
 function printResult(results, showDetails, mode) {
   const showPrice = mode === "price" || mode === "both";
   const showPct = mode === "pct" || mode === "both";
-  const sep = "=".repeat(78);
   const items = Array.isArray(results) ? results : [results];
   const validItems = items.filter((r) => !r.error);
   const multiStock = validItems.length > 1;
@@ -179,6 +196,7 @@ function printResult(results, showDetails, mode) {
 
   if (multiStock) {
     // ============ 多股对比表 ============
+    const sep = "=".repeat(78);
     console.log(`\n${sep}`);
     console.log(`  多股分时差值对比 (${timeLabel})`);
     console.log(
@@ -186,28 +204,52 @@ function printResult(results, showDetails, mode) {
     );
     console.log(sep);
 
-    let header = `  ${"代码".padEnd(8)} ${"名称".padEnd(10)} ${"交易日".padStart(5)} ${"有效".padStart(4)} `;
-    if (showPrice) {
-      header += `${"价差和".padStart(9)} `;
-    }
-    header += `${"涨/跌/平".padStart(10)}`;
-    if (showPct) {
-      header += ` ${"%和".padStart(9)}`;
-    }
-    console.log(header);
-    console.log("  " + "-".repeat(65));
+    // 构建表格数据行
+    const rows = validItems.map((r) => {
+      const totalStr = r.total > 0 ? "+" + r.total.toFixed(2) : r.total.toFixed(2);
+      const pctStr = r.pct_total > 0 ? "+" + r.pct_total.toFixed(2) : r.pct_total.toFixed(2);
+      return {
+        code: r.code,
+        name: (r.name || r.code).slice(0, 10),
+        days: String(r.total_trading_days),
+        valid: String(r.valid_days),
+        total: totalStr,
+        pnz: r.positive_count + "/" + r.negative_count + "/" + r.zero_count,
+        pctTotal: pctStr + "%",
+      };
+    });
 
-    validItems.forEach((r) => {
-      let line = `  ${r.code.padEnd(8)} ${(r.name || r.code).padEnd(10)} ${String(r.total_trading_days).padStart(5)} ${String(r.valid_days).padStart(4)} `;
-      if (showPrice) {
-        const totalStr = r.total > 0 ? "+" + r.total.toFixed(2) : r.total.toFixed(2);
-        line += `${totalStr.padStart(9)} `;
-      }
-      line += `${(r.positive_count + "/" + r.negative_count + "/" + r.zero_count).padStart(10)}`;
-      if (showPct) {
-        const pctStr = r.pct_total > 0 ? "+" + r.pct_total.toFixed(2) : r.pct_total.toFixed(2);
-        line += ` ${pctStr.padStart(8)}%`;
-      }
+    // 计算每列最大视觉宽度
+    const headers = ["代码", "名称", "交易日", "有效"];
+    const keys = ["code", "name", "days", "valid"];
+    // 全部右对齐：标题与数据列在同一基准线对齐
+    const aligns = ["right", "right", "right", "right"];
+    if (showPrice) { headers.push("价差和"); keys.push("total"); aligns.push("right"); }
+    headers.push("涨/跌/平"); keys.push("pnz"); aligns.push("right");
+    if (showPct) { headers.push("%和"); keys.push("pctTotal"); aligns.push("right"); }
+
+    const colWidths = headers.map((h, i) => {
+      let mw = vw(h);
+      rows.forEach((row) => { const w = vw(String(row[keys[i]])); if (w > mw) mw = w; });
+      return mw + 2;
+    });
+
+    // 输出标题行（右对齐，与数据列保持一致）
+    let headerLine = "  ";
+    headers.forEach((h, i) => headerLine += vpr(h, colWidths[i]));
+    console.log(headerLine);
+
+    // 输出分隔线
+    const totalWidth = colWidths.reduce((a, b) => a + b, 0);
+    console.log("  " + "-".repeat(totalWidth));
+
+    // 输出数据行
+    rows.forEach((row) => {
+      let line = "  ";
+      keys.forEach((k, i) => {
+        const val = String(row[k]);
+        line += (aligns[i] === "right") ? vpr(val, colWidths[i]) : vpl(val, colWidths[i]);
+      });
       console.log(line);
     });
 
